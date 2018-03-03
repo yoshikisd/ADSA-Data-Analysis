@@ -1,0 +1,319 @@
+////////////////////////////////////////////////////////////////////////////////
+// Section name: ADSA MultiCycle
+// Purpose:	To be used as a custom programmed button to change which number cycle is viewed in the "surface tension versus % relative area" cycling graph. Cycle detection is based on peak detection via
+//		slope transition (i.e. change from a positive slope to a negative slope). Also, this code is to be used to batch process a group of RAW ADSA DAT files.
+//
+// Initial Instructions:
+//	(1) For this code to work properly, you need to create a "Group Plot Theme" named "ADSA". This is used to automatically implement a custom theme for the multi-cycle plot that is
+//		somewhat suited for publication (i.e. all plots are black with open symbols and each plot utilizes different shapes)
+//	(2) To do this, open an empty worksheet, click on any cell, and then press the "Line + Symbol" button to open the plot setup window.
+//	(3) Add two plots into the graph window by pressing the check box for A and B as X and Y, respectively, and subsequently pressing the "Add" button.
+//	(4) Once you see that you have two plots added to the bottom window, select both of them (Shift + Click), right click on one of them, and press "Group"
+//	(5) Press the "Ok" button to generate the plot. You should have created a graph with no points and two items present in the legend.
+//	(6) Right click on the "1" (enclosed in a gray box) located on the top left corner and select "Layer Properties"
+//	(7) Select the top instance of [Book1]Sheet1! A(X), B(Y) [1*.0*]
+//	(8) In the "Group" tab, change the graph visual parameters to however you please. Once complete, right click in the box containing the parameters and press "Save Theme". Then save the theme as "ADSA"
+//	(9) You may now exit out of the window.
+//
+// Instructions for toolbar implementation:
+//	(1) In OriginLab, press the tool menu and press the toolbar button. Alternatively, you can use the keyboard shortcut: CTRL + T.
+//	(2) In the toolbar window, select the "Button Groups" tab and select any available button to assign this code to.
+//	(3) Once a button has been selected, press the "Settings" button. 
+//	(4) Press the "Browse" button (located next to the "File Name" text box) and find the file which contains this code
+//	(5) Press OK, and then drag the newly assigned button to wherever is most convenient for you
+//	(6) Exit out of the toolbar window. The button is ready to be used.
+//
+// Instructions for multi-import implementation:
+//	(1) In OriginLab, press the "Import Multiple ASCII" button. Alternatively, press SHIFT + ALT + 3 and then enter "impASC" into the newly open Script Window
+//	(2) Select the files you wish to import
+//	(3) In the ASCII:impASC window, scroll down to the bottom of the window. Then paste this entire section of code into the textbox titled "Script after All Files Imported"
+//	(4) Press the right-pointed triangle on the top right corner of the window, and press "Save As" to create a new theme. Creating this theme will allow you to simply select the theme to perform the 
+//		import processing rather than having to copy and paste this code for every import.
+//	(5) Press the "Ok" button in the ASCII:impASC window to begin the import. A dialog box will open to indicate when the batch import and processing has completed.
+//
+// Modifications:
+// 	2/27/16: One-click functionality added; you only need to click the designated button once to begin processing ALL of the workbooks in the project folder
+// 	3/2/16: Improved coding of the one-click functionality to improve reliability
+//	5/30/16: Utilizes volume instead of area for peak analysis. Additionally, peak identification now analyzed using slopes (<1) rather than comparison to maximum %RA
+//	7/9/16: Instead of using "1's" for slope detection, truncation is now used so "0's" may be used to detect slopes
+//	10/13/17: Additional code documentation made
+////////////////////////////////////////////////////////////////////////////////
+
+//Turn off spreadsheet cell notation in Origin 2017
+page.xlcolname=0;
+
+//Rearranges windows prior to batch data processing (without this, you will need to manually reorder the windows in decending order [i.e. run A is closest to the screen while run "n" is the furthest back])
+window -s cv2;
+
+//Makes a loop to repeat the DAT processing for all workbooks in the active folder/screen
+doc -ef W 
+{
+/////////////////////////////////////////////////////////Variable Initialization//////////////////////////////////////////////////////////////
+	{
+		//Get the name of the currently open ASCII file. This is the name of the dataset
+		data$ = page.name$; 			
+		
+		//Enables modification of column short names
+		page.xlcolname = 0;
+		
+		//Initializing and modifying columns
+		{
+			wks.col1.name$ = Number;
+			wks.col2.name$ = Time;
+			wks.col2.unit$ = s;
+			wks.col3.name$ = SurfaceTension;
+			wks.col3.unit$ = mN/m;
+			wks.col4.name$ = SurfacePressure;
+			wks.col4.unit$ = mN/m;
+			wks.col5.name$ = Area;
+			wks.col5.unit$ = cm^2;
+			wks.col6.name$ = Volume;
+			wks.col6.unit$ = ul;
+			wks.col7.name$ = ContactAngle;
+			wks.col7.unit$ = degrees;
+		}
+		
+		//Initialize variables for the peak analysis
+		{
+			finalRow = wks.maxRows; 					//Finds the final row that contains data
+			tInt = 0; 	 						//Initial time value for scanning
+			tFin = 0;							//Final time value for scanning
+			vInt = 0;							//Initial volume value for scanning
+			vFin = 0;							//Final volume value for scanning
+			tngt = 0;							//Variable for storing the slope tangent value	[(vFin-tInt)/(tFin-tInt)]
+			storedCycles = 0; 						//Counter for stored cycles, maximum of 6 for 1,5,10,20,30,40 cycles.
+			rangeFirst = 0;							//Variables for first and end ranges
+			rangeEnd = 0;
+			scanProgression = 0;						//An integer which keeps track of the scan per cycle progression
+											//i.e. 0=start, 1=hilltop "end", 2=valley "start", 3=valley "end", 4=hilltop "start"
+			dataSheet$ = wks.name$;						//Obtain long name for the analyzed dataset
+			%B = "MultCyc" + data$;						//Obtain the short name for the MultiCycle graph
+			ii = 0;								//Initialize global incrementing variable ii
+			rowTick = 1;
+			MCL$ = "";							//Initializes a string to store the multi cycle legend text
+		}
+	}
+
+	///////////////////////////////////////////////////////////ADSA Data Plotting////////////////////////////////////////////////////////////////
+	{
+		worksheet -s 1 0 7 0;							//Selects all cells of columns 1-7
+		
+		//Generating the stacked plot for Surface Tension, Area, and Volume vs Time
+		{
+			//Select columns 1 to 4, and plot into STACKCYCLE template
+			plotstack iy:=((2,6),(2,5),(2,3)) plottype:=linesymb legend:=0 template:=STACKCYCLE>; 
+			
+			loop (ii,1,3) 
+			{
+				layer -s ii; 						//Selects the plot layer
+				set %C -kf 1;						//Makes the plots with an open symbol
+			} 														
+			string stavtPlot$ = page.name$; 				//Get name of the stacked graph
+			win -r %(stavtPlot$) Stack%(data$); 				//Replace it with the name of the Stack + ASCII file
+			page.title = 3; 						//Show only long name
+			layer.x.from = 0;						//Starts the cycling graph from 0
+			window -i; 							//Minimize cycle stack graph window
+		}
+
+		//Generating the SurfT vs Area plot
+		{
+			wks.col = 2; 							//Selects the second column
+			wks.insert(RelArea); 						//Insert a column called RelArea infront of column 2
+			wks.col.type = 4;						//Make it a X column, for plotting
+			worksheet -i 7 cyclearea; 					//Create a 7th column called cyclearea
+			col(cyclearea) = col(Area); 					//Make it equal to the column "area"
+			range bb = col(cyclearea)[1:80]; 								
+			bb = 0; 							//Make the first 80 values zero, since these are more than 100% of the max area upon cycling
+			col(RelArea) = col(Area)/max(col(cyclearea))*100; 		//Set the relative area column with this formula
+			plotxy (2,4) plot:=202 ogl:=[<new template:=CYCLE>];	 	//Plot surface tension against relative area (col 3 against col 2)
+			layer.x.from = 40;						//Alters the axis ranges
+			layer.x.to = 105;
+			layer.y.from = 0;
+			layer.y.to = 50; 																		
+			set %C -kf 1;							//Makes the plots with an open symbol
+			string cyclicPlot$ = page.name$; 				//Get the name of cycle graph
+			win -r %(cyclicPlot$) Cycle%(data$); 				//Replace name with name of Stack + ASCII file
+			page.title = 3; 						//Show long name only
+			window -i; 							//Minimizes cycling graph window
+		}
+	}
+	
+	/////////////////////////////////////////////////////Peak Analysis (Cycle Detection) and Data Processing//////////////////////////////////////////////////////
+	worksheet -s 1 0 7 0;								//Selects all cells of columns 1-7
+	
+	//Initializes function tngtFind to return the slope (backwards finite difference).
+	function double tngt(int x)
+	{
+		//Initialize 
+		y = x - 1;								//This, unfortunately, needs to be done since, for whatever reason,
+		z = y + 1; 								//the independent argument value will NEVER become updated within this function.	
+		tInt = [data$]1!Cell(y,3);
+		tFin = [data$]1!Cell(z,3);
+		vInt = [data$]1!Cell(y,7);
+		vFin = [data$]1!Cell(z,7);
+		
+		//////////////////
+		//////CAUTION/////	Depending on how long your periods are, you may have to multiply (vFin-vInt) by a base 10 factor. This code appears to work well for cyclic periods of ~5 seconds. 
+		//////////////////	When tested with periods of ~30 seconds, multiplying (vFin-vInt) by 10 appeared to allow peak detection to occur normally.
+		return int((vFin - vInt)/(tFin - tInt));	
+	}
+
+	//Creates a new worksheet to import cycle range and min/max Surface Tension of the range into a new worksheet
+	newsheet book:=data$ name:="Multi-Cycle Raw Data" cols:=15 labels:="Cycle|Start|End|Min SurT|Max SurT|C:RA_i|C:ST_i|C:RA_f|C:ST_f|AVG Comp|E:RA_i|E:ST_i|E:RA_f|E:ST_f|AVG Exp";	
+	csetvalue col:=col(j) formula:="(col(h)-col(f))/(col(i)-col(g))" recalculate:=1;
+	csetvalue col:=col(o) formula:="(col(m)-col(k))/(col(n)-col(l))" recalculate:=1;
+	 
+	
+	for (ii = 1 ; ii <= 15; ii++)
+	{
+		if (ii>3)
+		{
+			wks.col$(ii).digits = 4;
+		}
+		wks.col$(ii).width = 5;
+	}
+	page.active$ = dataSheet$;		
+
+	////Searches all rows containing data (used tFin instead of tInt since the latter would require a termination arguement to prevent scanning for a null value)
+	for (ii = 2 ; ii <= finalRow ; ii++)
+	{
+		if (tngt(ii) < 0)
+		{
+			//First Filter: Find the last instance on the "hilltop" where tngt <=1
+			//This can be done by finding the first instance where tngt > 1 and use the previous value
+			//(ii-1) as the rangeFirst. This assumes that, for the v vs t waveform, the very first set of data starts
+			//off "on top of the hill".
+			if (scanProgression == 0)					//Has the scan begun?
+			{
+				rangeFirst = ii-1;
+				scanProgression = 1;					//Hilltop "end" found
+			}
+			//End of the scan: stops the cycle scan here.
+			if (scanProgression == 4)
+			{
+				rangeEnd = ii-1;
+				storedCycles += 1;
+				scanProgression = 0;
+				if (storedCycles == 1 || storedCycles == 5 || (mod(storedCycles,10) == 0 && storedCycles > 0))	
+				{
+					//Obtains cycle min/max surface area from raw data sheet
+					range rrSurT = [data$]1!Col(4)[rangeFirst:rangeEnd];
+					maxSurT = max(rrSurT);
+					minSurT = min(rrSurT);
+					
+					//Imports cycle range data
+					[data$]2!Cell(rowTick,1) = storedCycles;	//Cycle number
+					[data$]2!Cell(rowTick,2) = rangeFirst;		//Range Start
+					[data$]2!Cell(rowTick,3) = rangeEnd;		//Range End
+					[data$]2!Cell(rowTick,4) = minSurT;		//Minimum surface tension
+					[data$]2!Cell(rowTick,5) = maxSurT;		//Maximum surface tension
+					rowTick += 1;
+				}
+				ii = ii - 1;
+			}
+		}
+		
+		//Intermediate filters: primary job of these filters is to bypass the datapoints that do not fit the criterion of
+		//the cycle's beginning and end (i.e. not the end of the hilltop nor the end of the valley)
+		if (tngt(ii) == 0)
+		{
+			if (scanProgression == 1)
+			{
+				scanProgression = 2;
+			}
+			if (scanProgression == 3)
+			{
+				scanProgression = 4;
+			}
+		}
+		//False-Positive detection for local "mini-vallies" via tngt(ii + 1) > 0
+		if (tngt(ii) > 0 && tngt(ii+1) > 0)
+		{
+			//Second Filter: Find the last instance on the "valley" where tngt <=0
+			
+			if (scanProgression == 2)					//Has the valley "end" been found?
+			{
+				scanProgression = 3;
+			}
+		}
+		if (ii == finalRow)
+		{
+			storedCycles += 1;
+			if (scanProgression >= 3 && storedCycles > 0 && (mod(storedCycles,10) == 0 || storedCycles==5))
+			{
+				rangeEnd = finalRow;
+				//Obtains cycle min/max surface area from raw data sheet
+				range rrSurT = [data$]1!Col(4)[rangeFirst:rangeEnd];
+				maxSurT = max(rrSurT);
+				minSurT = min(rrSurT);
+				
+				//Imports cycle range data
+				[data$]2!Cell(rowTick,1) = storedCycles;		//Cycle number
+				[data$]2!Cell(rowTick,2) = rangeFirst;			//Range Start
+				[data$]2!Cell(rowTick,3) = rangeEnd;			//Range End
+				[data$]2!Cell(rowTick,4) = minSurT;			//Minimum surface tension
+				[data$]2!Cell(rowTick,5) = maxSurT;			//Maximum surface tension
+				rowTick += 1;
+			}
+			else 
+			{
+				break;
+			}
+		}
+	}
+	page.active$ = dataSheet$;	
+
+	//Creation of the Multi-Cycle plot
+	for (ii = 1; ii < rowTick; ii++)						//< rather than <= due to the additional incrementation at the end of the for loop
+	{
+		storedCycles = [data$]2!Cell(ii,1);					//Stores the cycle number
+		rangeFirst = [data$]2!Cell(ii,2);					//Stores the range of the first data point
+		rangeEnd = [data$]2!Cell(ii,3);						//Stores the range of the second data point
+		
+		//For the first cycle, create a new graph which will contain all the cycling data: MULTCYC
+		if (ii == 1)
+		{
+			//Plot surface tension against relative area (col 3 against col 2)
+			plotxy iy:=[data$]dataSheet$!(2,4[rangeFirst:rangeEnd]) plot:=202 ogl:=[<new template:=MULTCYC>] rescale:=0; 	
+			
+			string multiCycPlot$ = page.name$; 				//Get the name of cycle graph
+			win -r %(multiCycPlot$) MultCyc%(data$);			//Replace name with name of Cycle + ASCII file
+			page.title = 3; 						//Show long name only
+			layer.x.from = 40;						//Alters the range of the axis
+			layer.x.to = 105;
+			layer.y.from = 0;
+			layer.y.to=50;
+			MCL$ = \l($(ii)) Cycle $(storedCycles);				//Creates string MCL$, which stores "Cycle 1"
+		}
+		//Plots graphs for the remaining cycles stored in MultiCycle dataset
+		else 
+		{
+			win -a %B;							//Sets the active window to the MultiCycle dataset 
+			
+			//Plot surface tension against relative area (col 3 against col 2)
+			plotxy iy:=[data$]dataSheet$!(2,4[rangeFirst:rangeEnd]) ogl:=1 plot:=202 rescale:=0;	
+			
+			layer.x.from = 40;						//Alters the range of the axis
+			layer.x.to = 105;
+			layer.y.from = 0;
+			layer.y.to=50;
+			MCL$ += %(LF)\l($(ii)) Cycle $(storedCycles);			//Adds new "Cycle __" to MCL$
+		}	
+	}
+	//Group the plots in the multicycle window
+	win -a %B;									//Sets the active window to the MultiCycle dataset
+	layer -g;									//Groups all the datasets in the active layer
+	set %C -kf 1;									//Makes all plots open symbol
+	legend.text$ = MCL$;								//Sets the legend text to be MCL$
+	themeApply2g theme:= "ADSA";							//Applies a theme for color and symbols in the plots. This must be manually established in Origin, otherwise
+											//the plots will all be plotted as default black line with solid black squares.
+	window -i;									//Closes the active window
+	page.active$ = "Multi-Cycle Raw Data";																	
+	wks.col1.format = 2;								//Changes the format of column 1 in the MultiCycle dataset to be text
+	window -i;									//Closes the active window
+}
+
+type -a "";										//Prints out a completion message on the screen
+type "*****   ADSA Plotting custom routine has been completed   *****";
+type "---------------------------------------------------------------";
+type "";
